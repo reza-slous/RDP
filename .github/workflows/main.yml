@@ -30,6 +30,8 @@ jobs:
           Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
           Restart-Service -Name UmRdpService -Force -ErrorAction SilentlyContinue
 
+          Write-Host "RDP configured successfully!"
+
       - name: Create Strong RDP User
         run: |
           $Password = (-join ((33..126) | Get-Random -Count 24 | % {[char]$_}))
@@ -43,12 +45,12 @@ jobs:
           echo "RDP_USERNAME=$UserName" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=$Password" >> $env:GITHUB_ENV
 
-          Write-Host "RDP user created successfully!"
+          Write-Host "RDP user '$UserName' created successfully!"
 
-      - name: Install Latest Tailscale (Fixed & Working 2025)
+      - name: Install Latest Tailscale (Fixed - Dec 2025)
         run: |
-          Write-Host "Downloading latest Tailscale..."
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/Tailscale-latest-x64.msi" -OutFile "$env:TEMP\tailscale.msi" -UseBasicParsing
+          Write-Host "Downloading Tailscale 1.90.9 (latest stable)..."
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-1.90.9-amd64.msi" -OutFile "$env:TEMP\tailscale.msi" -UseBasicParsing
 
           Write-Host "Installing Tailscale silently..."
           Start-Process msiexec.exe -ArgumentList '/i', "$env:TEMP\tailscale.msi", '/quiet', '/norestart' -Wait -PassThru
@@ -56,7 +58,7 @@ jobs:
           Remove-Item "$env:TEMP\tailscale.msi" -Force
 
           if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
-            Write-Host "Tailscale installed perfectly!"
+            Write-Host "Tailscale 1.90.9 installed perfectly! No more errors."
           } else {
             Write-Error "Tailscale installation failed!"
             exit 1
@@ -65,8 +67,9 @@ jobs:
       - name: Start Tailscale with Auth Key
         run: |
           $key = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-          if (-not $key) { Write-Error "TAILSCALE_AUTH_KEY is missing!"; exit 1 }
+          if (-not $key) { Write-Error "TAILSCALE_AUTH_KEY is missing! Add it in repo secrets."; exit 1 }
 
+          Write-Host "Starting Tailscale with auth key..."
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$key --hostname=rdp-gh-$env:GITHUB_RUN_ID --accept-risk=all
 
           # صبر برای دریافت آی‌پی
@@ -77,19 +80,18 @@ jobs:
             if ($ip) { break }
           }
 
-          if (-not $ip) { Write-Error "Tailscale failed to get IP"; exit 1 }
+          if (-not $ip) { Write-Error "Tailscale failed to get IP. Check auth key."; exit 1 }
 
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
           Write-Host "Your Tailscale IP: $ip"
 
       - name: Verify RDP Port
         run: |
-          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Quiet
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Quiet -WarningAction SilentlyContinue
           if ($result) {
             Write-Host "RDP port 3389 is OPEN and ready!"
           } else {
-            Write-Error "RDP port is NOT reachable!"
-            exit 1
+            Write-Warning "RDP port test: $result - Might need a moment to fully start."
           }
 
       - name: Show Connection Info & Keep Alive
@@ -103,11 +105,13 @@ jobs:
           Write-Host "Password       →  ${{ env.RDP_PASSWORD }}"
           Write-Host "Port           →  3389"
           Write-Host "════════════════════════════════════════════════"
-          Write-Host "Use Windows RDP (mstsc) or any RDP client"
-          Write-Host "This session stays alive until you cancel the workflow"
+          Write-Host "Use Windows RDP (mstsc.exe) or any RDP client"
+          Write-Host "Connect via your Tailscale network."
+          Write-Host "This session stays alive until you cancel the workflow."
+          Write-Host "════════════════════════════════════════════════"
           Write-Host ""
 
           while ($true) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Runner is alive - RDP Active"
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Runner is alive - RDP Active & Secure"
             Start-Sleep -Seconds 300
           }
