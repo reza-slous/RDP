@@ -11,108 +11,103 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop
+          # فعال‌سازی Remote Desktop
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Type DWord -Force
 
-          # Disable Network Level Authentication (NLA) - مهم برای اتصال راحت
+          # غیرفعال کردن Network Level Authentication (NLA)
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Type DWord -Force
 
-          # Allow RDP with standard RDP encryption only (0 = RDP, 1 = Negotiate, 2 = SSL)
+          # اجازه اتصال با رمزنگاری استاندارد RDP
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1 -Type DWord -Force
-
-          # Allow connections with blank password (اختیاری - فقط اگر لازم بود)
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name "LimitBlankPasswordUse" -Value 0 -Type DWord -Force
 
           # حذف قانون قدیمی فایروال
           netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
 
-          # باز کردن پورت 3389 برای همه (در محیط GitHub Runner امن است چون فقط از طریق Tailscale در دسترس است)
+          # باز کردن پورت 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 profile=any
 
           # ری‌استارت سرویس RDP
-          Restart-Service -Name TermService -Force
+          Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
           Restart-Service -Name UmRdpService -Force -ErrorAction SilentlyContinue
 
-      - name: Create RDP User with Secure Random Password
+      - name: Create Strong RDP User
         run: |
-          $PasswordLength = 20
-          $Chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%^&*".ToCharArray()
-          $Password = ($Chars | Get-Random -Count $PasswordLength) -join ''
-          
+          $Password = (-join ((33..126) | Get-Random -Count 24 | % {[char]$_}))
           $SecurePass = ConvertTo-SecureString $Password -AsPlainText -Force
           $UserName = "rdpuser"
 
-          # ساخت کاربر
-          New-LocalUser -Name $UserName -Password $SecurePass -FullName "RDP User" -Description "Created by GitHub Actions" -AccountNeverExpires -PasswordNeverExpires | Out-Null
-          
-          # اضافه کردن به گروه‌های مورد نیاز
+          New-LocalUser -Name $UserName -Password $SecurePass -FullName "GitHub RDP User" -Description "Created by Actions" -AccountNeverExpires -PasswordNeverExpires | Out-Null
           Add-LocalGroupMember -Group "Administrators" -Member $UserName -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $UserName
 
-          Write-Host "User '$UserName' created successfully!"
-
-          # ذخیره اطلاعات برای نمایش نهایی
           echo "RDP_USERNAME=$UserName" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=$Password" >> $env:GITHUB_ENV
 
-      - name: Install Latest Tailscale
+          Write-Host "RDP user created successfully!"
+
+      - name: Install Latest Tailscale (Fixed & Working 2025)
         run: |
-          # آخرین نسخه Tailscale (به‌روز تا دسامبر ۲۰۲۵)
-          $url = "https://pkgs.tailscale.com/stable/Tailscale-latest-amd64.msi"
-          $out = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$out`"", "/quiet", "/norestart" -Wait
-          Remove-Item $out -Force
+          Write-Host "Downloading latest Tailscale..."
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/Tailscale-latest-x64.msi" -OutFile "$env:TEMP\tailscale.msi" -UseBasicParsing
 
-          Write-Host "Tailscale installed successfully."
+          Write-Host "Installing Tailscale silently..."
+          Start-Process msiexec.exe -ArgumentList '/i', "$env:TEMP\tailscale.msi", '/quiet', '/norestart' -Wait -PassThru
 
-      - name: Start Tailscale with Auth Key
-        run: |
-          $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-          if (-not $authKey) { Write-Error "TAILSCALE_AUTH_KEY secret is missing!"; exit 1 }
+          Remove-Item "$env:TEMP\tailscale.msi" -Force
 
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-rdp-$env:GITHUB_RUN_ID --accept-risk=all
-
-          # صبر برای گرفتن آی‌پی
-          $ip = $null
-          for ($i = 0; $i -lt 20; $i++) {
-            Start-Sleep -Seconds 6
-            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
-            if ($ip) { break }
-          }
-
-          if (-not $ip) { Write-Error "Failed to get Tailscale IP"; exit 1 }
-
-          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
-          Write-Host "Tailscale IP: $ip"
-
-      - name: Verify RDP Port is Open
-        run: |
-          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
-          if ($result.TcpTestSucceeded) {
-            Write-Host "RDP port 3389 is OPEN and reachable!"
+          if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
+            Write-Host "Tailscale installed perfectly!"
           } else {
-            Write-Error "RDP port 3389 is NOT reachable!"
+            Write-Error "Tailscale installation failed!"
             exit 1
           }
 
-      - name: Keep Runner Alive & Show Connection Info
+      - name: Start Tailscale with Auth Key
         run: |
-          Write-Host "============================================"
-          Write-Host "           RDP READY TO CONNECT"
-          Write-Host "============================================"
-          Write-Host "Tailscale IP   : ${{ env.TAILSCALE_IP }}"
-          Write-Host "Username       : ${{ env.RDP_USERNAME }}"
-          Write-Host "Password       : ${{ env.RDP_PASSWORD }}"
-          Write-Host "Port           : 3389"
-          Write-Host "============================================"
-          Write-Host "Connect using Windows Remote Desktop (mstsc)"
-          Write-Host "This runner will stay alive until you cancel the workflow."
-          Write-Host "============================================"
+          $key = "${{ secrets.TAILSCALE_AUTH_KEY }}"
+          if (-not $key) { Write-Error "TAILSCALE_AUTH_KEY is missing!"; exit 1 }
 
-          # نگه داشتن رانر تا وقتی دستی کنسل کنی
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$key --hostname=rdp-gh-$env:GITHUB_RUN_ID --accept-risk=all
+
+          # صبر برای دریافت آی‌پی
+          $ip = $null
+          for ($i = 0; $i -lt 25; $i++) {
+            Start-Sleep -Seconds 5
+            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip --4 2>$null
+            if ($ip) { break }
+          }
+
+          if (-not $ip) { Write-Error "Tailscale failed to get IP"; exit 1 }
+
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "Your Tailscale IP: $ip"
+
+      - name: Verify RDP Port
+        run: |
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Quiet
+          if ($result) {
+            Write-Host "RDP port 3389 is OPEN and ready!"
+          } else {
+            Write-Error "RDP port is NOT reachable!"
+            exit 1
+          }
+
+      - name: Show Connection Info & Keep Alive
+        run: |
+          Write-Host ""
+          Write-Host "════════════════════════════════════════════════"
+          Write-Host "           RDP IS READY - CONNECT NOW!"
+          Write-Host "════════════════════════════════════════════════"
+          Write-Host "Tailscale IP   →  ${{ env.TAILSCALE_IP }}"
+          Write-Host "Username       →  ${{ env.RDP_USERNAME }}"
+          Write-Host "Password       →  ${{ env.RDP_PASSWORD }}"
+          Write-Host "Port           →  3389"
+          Write-Host "════════════════════════════════════════════════"
+          Write-Host "Use Windows RDP (mstsc) or any RDP client"
+          Write-Host "This session stays alive until you cancel the workflow"
+          Write-Host ""
+
           while ($true) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP Active - Cancel workflow to stop"
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Runner is alive - RDP Active"
             Start-Sleep -Seconds 300
           }
